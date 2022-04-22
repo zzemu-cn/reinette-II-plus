@@ -23,20 +23,46 @@
  * THE SOFTWARE.
  */
 
-
-#include <stdio.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
+#include <stdio.h>
+
 #include <SDL2/SDL.h>
 
 #include "puce6502.h"
+#include "dsk2nib.h"
+#include "nib2dsk.h"
 
+//#define SDL_RDR_SOFTWARE
+//#define ENABLE_SL6
+
+//#define ENABLE_LOG
+#include "stb/dbg.h"
+#include "stb/log.h"
+
+#ifdef ENABLE_LOG
+#define DASM_6502
+#endif
+
+int debug=0;
+
+#include "stb/stb_file.h"
+#include "stb/filehelp.h"
+
+
+#define SCREEN_RES_W	280
+#define SCREEN_RES_H	192
+#define SCREEN_BPP		8
 
 // memory layout
 #define RAMSIZE  0xC000
 #define ROMSTART 0xD000
 #define ROMSIZE  0x3000
+#define FONTROMSIZE  0x0800
 uint8_t ram[RAMSIZE];   // 48K of ram in $000-$BFFF
 uint8_t rom[ROMSIZE];   // 12K of rom in $D000-$FFFF
+//uint8_t fontrom[FONTROMSIZE];   // 2K of rom
 
 // language card
 #define LGCSTART 0xD000
@@ -51,29 +77,30 @@ uint8_t bk2[BK2SIZE];   // bank 2 of Language Card 4K in $D000-$DFFF
 #define SL6SIZE  0x0100
 uint8_t sl6[SL6SIZE];   // P5A disk ][ prom in slot 6
 
+#include "rom/apple2p.h"
 
 //================================================================ SOFT SWITCHES
 
-uint8_t KBD   = 0;                                                              // $C000, $C010 ascii value of keyboard input
-bool TEXT  = true;                                                              // $C050 CLRTEXT  / $C051 SETTEXT
-bool MIXED = false;                                                             // $C052 CLRMIXED / $C053 SETMIXED
-bool PAGE2 = false;                                                             // $C054 PAGE2 off / $C055 PAGE2 on
-bool HIRES = false;                                                             // $C056 GR       / $C057 HGR
-bool LCWR  = true;                                                              // Language Card writable
-bool LCRD  = false;                                                             // Language Card readable
-bool LCBK2 = true;                                                              // Language Card bank 2 enabled
-bool LCWFF = false;                                                             // Language Card pre-write flip flop
+uint8_t KBD   = 0; // $C000, $C010 ascii value of keyboard input
+bool TEXT  = true; // $C050 CLRTEXT  / $C051 SETTEXT
+bool MIXED = false;// $C052 CLRMIXED / $C053 SETMIXED
+bool PAGE2 = false;// $C054 PAGE2 off / $C055 PAGE2 on
+bool HIRES = false;// $C056 GR       / $C057 HGR
+bool LCWR  = true; // Language Card writable
+bool LCRD  = false;// Language Card readable
+bool LCBK2 = true; // Language Card bank 2 enabled
+bool LCWFF = false;// Language Card pre-write flip flop
 
 
 //====================================================================== PADDLES
 
-uint8_t PB0 = 0;                                                                // $C061 Push Button 0 (bit 7) / Open Apple
-uint8_t PB1 = 0;                                                                // $C062 Push Button 1 (bit 7) / Solid Apple
-uint8_t PB2 = 0;                                                                // $C063 Push Button 2 (bit 7) / shift mod !!!
+uint8_t PB0 = 0;   // $C061 Push Button 0 (bit 7) / Open Apple
+uint8_t PB1 = 0;   // $C062 Push Button 1 (bit 7) / Solid Apple
+uint8_t PB2 = 0;   // $C063 Push Button 2 (bit 7) / shift mod !!!
 float GCP[2] = { 127.0f, 127.0f };                                              // GC Position ranging from 0 (left) to 255 right
 float GCC[2] = { 0.0f };                                                        // $C064 (GC0) and $C065 (GC1) Countdowns
-int GCD[2] = { 0 };                                                             // GC0 and GC1 Directions (left/down or right/up)
-int GCA[2] = { 0 };                                                             // GC0 and GC1 Action (push or release)
+int GCD[2] = { 0 };// GC0 and GC1 Directions (left/down or right/up)
+int GCA[2] = { 0 };// GC0 and GC1 Action (push or release)
 uint8_t GCActionSpeed = 8;                                                      // Game Controller speed at which it goes to the edges
 uint8_t GCReleaseSpeed = 8;                                                     // Game Controller speed at which it returns to center
 long long int GCCrigger;                                                        // $C070 the tick at which the GCs were reseted
@@ -90,7 +117,7 @@ inline static uint8_t readPaddle(int pdl) {
 	GCC[pdl] -= (ticks - GCCrigger) / GCFreq;                                     // decreases the countdown
 	if (GCC[pdl] <= 0)                                                            // timeout
 		return GCC[pdl] = 0;                                                        // returns 0
-	return 0x80;                                                                  // not timeout, return something with the MSB set
+	return 0x80;     // not timeout, return something with the MSB set
 }
 
 
@@ -99,14 +126,14 @@ inline static uint8_t readPaddle(int pdl) {
 #define audioBufferSize 4096                                                    // found to be large enought
 Sint8 audioBuffer[2][audioBufferSize] = { 0 };                                  // see in main() for more details
 SDL_AudioDeviceID audioDevice;
-bool muted = false;                                                             // mute/unmute switch
+bool muted = false;// mute/unmute switch
 
 static void playSound() {
 	static long long int lastTick = 0LL;
 	static bool SPKR = false;                                                     // $C030 Speaker toggle
 
 	if (!muted) {
-		SPKR = !SPKR;                                                               // toggle speaker state
+		SPKR = !SPKR;  // toggle speaker state
 		Uint32 length = (int)((double)(ticks - lastTick) / 10.65625f);              // 1023000Hz / 96000Hz = 10.65625
 		lastTick = ticks;
 		if (length > audioBufferSize) length = audioBufferSize;
@@ -117,36 +144,91 @@ static void playSound() {
 
 //====================================================================== DISK ][
 
-int curDrv = 0;                                                                 // Current Drive - only one can be enabled at a time
+// DSK 143360/256/16 = 35
+uint8_t dsk_buf[ MAX_TRACKS_PER_DISK*BYTES_PER_TRACK ];
+uint8_t nib_buf[ MAX_TRACKS_PER_DISK*BYTES_PER_NIB_TRACK ];
+
+int curDrv = 0;    // Current Drive - only one can be enabled at a time
 
 struct drive {
 	char		 filename[400];                                                       // the full disk image pathname
+	int			dsk_type;
 	bool		 readOnly;                                                            // based on the image file attributes
-	uint8_t	 data[232960];                                                        // nibblelized disk image
-	bool		 motorOn;                                                             // motor status
+	//uint8_t	 data[232960];                                                        // nibblelized disk image
+	uint8_t		data[MAX_TRACKS_PER_DISK*BYTES_PER_NIB_TRACK];                           // nibblelized disk image
+	int			max_tracks;
+	bool		 motorOn;// motor status
 	bool		 writeMode;                                                           // writes to file are not implemented
-	uint8_t	 track;                                                               // current track position
-	uint16_t nibble;                                                              // ptr to nibble under head position
-} disk[2] = { 0 };                                                              // two disk ][ drive units
+	uint8_t	 track;  // current track position
+	uint16_t nibble; // ptr to nibble under head position
+} disk[2] = { 0 }; // two disk ][ drive units
 
+#include "apple2log.h"
+
+int is_dsk_file(size_t flen)
+{
+	int trk;
+	if(flen%BYTES_PER_TRACK) return 0;
+	trk = flen/BYTES_PER_TRACK;
+	if(trk>=35&&trk<=40) return trk;
+	return 0;
+}
+
+int is_nib_file(size_t flen)
+{
+	int trk;
+	if(flen%BYTES_PER_NIB_TRACK) return 0;
+	trk = flen/BYTES_PER_NIB_TRACK;
+	if(trk>=35&&trk<=40) return trk;
+	return 0;
+}
 
 int insertFloppy(SDL_Window *wdo, char *filename, int drv) {
+	FILE *f;
+	size_t r_len;
+	size_t flen = fn_filesize(filename);
+	int trk, trk_dsk, trk_nib;
 
-	FILE *f = fopen(filename, "rb");                                              // open file in read binary mode
-	if (!f || fread(disk[drv].data, 1, 232960, f) != 232960)                      // load it into memory and check size
-		return 0;
-	fclose(f);
+	disk[drv].dsk_type=0;
+	disk[drv].max_tracks=0;
+
+	trk = 0;
+	trk_dsk = is_dsk_file(flen);
+	trk_nib = is_nib_file(flen);
+	if(trk_dsk) trk=trk_dsk;
+	if(trk_nib) trk=trk_nib;
+	if(trk==0) return 0;
+
+	memset(disk[drv].data, 0, MAX_TRACKS_PER_DISK*BYTES_PER_NIB_TRACK);
+
+	if(trk_dsk) {
+		fread_buf_bin(filename, dsk_buf, flen, &r_len);
+		if(r_len!=flen) return 0;
+		dsk2nib( trk_dsk, DEFAULT_VOLUME, dsk_buf, nib_buf );
+		memcpy(disk[drv].data, nib_buf, trk_dsk*BYTES_PER_NIB_TRACK);
+		disk[drv].max_tracks=trk_dsk;
+		disk[drv].dsk_type=2;
+	}
+
+	if(trk_nib) {
+		f = fopen(filename, "rb");                                              // open file in read binary mode
+		if (!f || fread(disk[drv].data, 1, flen, f) != flen)                      // load it into memory and check size
+			return 0;
+		fclose(f);
+		disk[drv].max_tracks=trk_nib;
+		disk[drv].dsk_type=1;
+	}
 
 	sprintf(disk[drv].filename, "%s", filename);                                  // update disk filename record
 
 	f = fopen(filename, "ab");                                                    // try to open the file in append binary mode
-	if (f) {                                                                      // success, file is writable
+	if (f) {         // success, file is writable
 		disk[drv].readOnly = false;                                                 // update the readOnly flag
-		fclose(f);                                                                  // and close it untouched
+		fclose(f);     // and close it untouched
 	} else {
 		disk[drv].readOnly = true;                                                  // f is NULL, no writable, no need to close it
 	}
-	char title[1000];                                                             // UPDATE WINDOW TITLE
+	char title[1000];// UPDATE WINDOW TITLE
 	int i, a, b;
 
 	i = a = 0;
@@ -162,22 +244,90 @@ int insertFloppy(SDL_Window *wdo, char *filename, int drv) {
 	return 1;
 }
 
+#ifdef LOADDSK
+int loadFloppy(SDL_Window *wdo, char *filename, const uint8_t* data, int data_len, int drv) {
+	FILE *f;
+	size_t r_len;
+	size_t flen = data_len;
+	int trk, trk_dsk, trk_nib;
 
-int saveFloppy(int drive) {
-	if (!disk[drive].filename[0]) return 0;                                       // no file loaded into drive
-	if (disk[drive].readOnly) return 0;                                           // file is read only write no aptempted
+	disk[drv].dsk_type=0;
+	disk[drv].max_tracks=0;
 
-	FILE *f = fopen(disk[drive].filename, "wb");
-	if (!f) return 0;                                                             // could not open the file in write overide binary
+	trk = 0;
+	trk_dsk = is_dsk_file(flen);
+	trk_nib = is_nib_file(flen);
+	if(trk_dsk) trk=trk_dsk;
+	if(trk_nib) trk=trk_nib;
+	if(trk==0) return 0;
 
-	if (fwrite(disk[drive].data, 1, 232960, f) != 232960) {                       // failed to write the full file (disk full ?)
-		fclose(f);                                                                  // release the ressource
-		return 0;
+	memset(disk[drv].data, 0, MAX_TRACKS_PER_DISK*BYTES_PER_NIB_TRACK);
+
+	if(trk_dsk) {
+		memcpy(dsk_buf, data, flen);
+		dsk2nib( trk_dsk, DEFAULT_VOLUME, dsk_buf, nib_buf );
+		memcpy(disk[drv].data, nib_buf, trk_dsk*BYTES_PER_NIB_TRACK);
+		disk[drv].max_tracks=trk_dsk;
+		disk[drv].dsk_type=2;
 	}
-	fclose(f);                                                                    // success, release the ressource
+
+	if(trk_nib) {
+		memcpy(disk[drv].data, data, flen);
+		disk[drv].max_tracks=trk_nib;
+		disk[drv].dsk_type=1;
+	}
+
+	sprintf(disk[drv].filename, "%s", filename);                                  // update disk filename record
+
+	disk[drv].readOnly = false;
+
+	char title[1000];// UPDATE WINDOW TITLE
+	int i, a, b;
+
+	i = a = 0;
+	while (disk[0].filename[i] != 0)                                              // find start of filename for disk0
+		if (disk[0].filename[i++] == '\\') a = i;
+	i = b = 0;
+	while (disk[1].filename[i] != 0)                                              // find start of filename for disk1
+		if (disk[1].filename[i++] == '\\') b = i;
+
+	sprintf(title, "Reinette ][+   D1: %s   D2: %s", disk[0].filename + a, disk[1].filename + b);
+	SDL_SetWindowTitle(wdo, title);                                               // updates window title
+
 	return 1;
 }
+#endif
 
+int saveFloppy(int drive) {
+	size_t sz;
+	if (!disk[drive].filename[0]) return 0;                                       // no file loaded into drive
+	if (disk[drive].readOnly) return 0;                                           // file is read only write no aptempted
+	if (disk[drive].dsk_type==0) return 0;
+
+	// DSK
+	if(disk[drive].dsk_type==2) {
+		if(nib2dsk( dsk_buf, disk[drive].data, disk[drive].max_tracks)) {
+			sz = disk[drive].max_tracks*BYTES_PER_TRACK;
+			if(fwrite_buf_bin(disk[drive].filename, dsk_buf, sz)!=sz)
+				return 0;
+			else
+				return 1;
+		}
+	}
+
+
+	// NIB
+	sz = disk[drive].max_tracks*BYTES_PER_NIB_TRACK;
+
+	if(fwrite_buf_bin(disk[drive].filename, disk[drive].data, sz)!=sz)
+		return 0;
+	else
+		return 1;
+}
+
+
+/*
+int halfTrackPos[2] = { 0 };
 
 void stepMotor(uint16_t address) {
 	static bool phases[2][4] = { 0 };                                             // phases states (for both drives)
@@ -185,7 +335,7 @@ void stepMotor(uint16_t address) {
 	static bool phasesBB[2][4] = { 0 };                                           // phases states Before Before
 	static int pIdx[2] = { 0 };                                                   // phase index (for both drives)
 	static int pIdxB[2] = { 0 };                                                  // phase index Before
-	static int halfTrackPos[2] = { 0 };
+	//static int halfTrackPos[2] = { 0 };
 
 	address &= 7;
 	int phase = address >> 1;
@@ -203,20 +353,77 @@ void stepMotor(uint16_t address) {
 	if ((phasesBB[curDrv][(phase + 1) & 3]) && (--halfTrackPos[curDrv] < 0))      // head is moving in
 		halfTrackPos[curDrv] = 0;
 
-	if ((phasesBB[curDrv][(phase - 1) & 3]) && (++halfTrackPos[curDrv] > 140))    // head is moving out
-		halfTrackPos[curDrv] = 140;
+//	if ((phasesBB[curDrv][(phase - 1) & 3]) && (++halfTrackPos[curDrv] > 140))    // head is moving out
+//		halfTrackPos[curDrv] = 140;
+	if ((phasesBB[curDrv][(phase - 1) & 3]) && (++halfTrackPos[curDrv] > MAX_TRACKS_PER_DISK*4-2))    // head is moving out
+		halfTrackPos[curDrv] = MAX_TRACKS_PER_DISK*4-2;
 
 	phases[curDrv][phase] = true;                                                 // update track#
 	disk[curDrv].track = (halfTrackPos[curDrv] + 1) / 2;
 }
+*/
 
+int quarterTrackPos[2] = { 0 };
+int phs[2][4]={{0,0,0,0},{0,0,0,0}};
 
-inline void setDrv(int drv) {
-	disk[drv].motorOn = disk[!drv].motorOn || disk[drv].motorOn;                  // if any of the motors were ON
-	disk[!drv].motorOn = false;                                                   // motor of the other drive is set to OFF
-	curDrv = drv;                                                                 // set the current drive
+void stepMotorQ(uint16_t address) {
+	address &= 7;
+	int phase = address >> 1;
+
+	int ph[4];
+	int q, qT;
+
+	phs[curDrv][phase] = address&1;
+
+	for(int i=0;i<4;i++) ph[i]=phs[curDrv][i];
+	if(ph[0]==ph[2]) ph[0]=ph[2]=0;
+	if(ph[1]==ph[3]) ph[1]=ph[3]=0;
+
+	q=8;
+		if(ph[0]) { q=0; if(ph[1]) q=1; if(ph[3]) q=7; }
+	else
+		if(ph[1]) { q=2; if(ph[2]) q=3; }
+	else
+		if(ph[2]) { q=4; if(ph[3]) q=5; }
+	else
+		if(ph[3]) { q=6; }
+
+	if(!disk[curDrv].motorOn) return;
+
+	if(q!=8) {
+		qT=quarterTrackPos[curDrv]&0x7;
+		if(q<qT) q = q+8-qT; else q = q-qT;
+		// q 0--7
+		if(q>=1&&q<=3) quarterTrackPos[curDrv]+=q;
+		if(q>=5&&q<=7) quarterTrackPos[curDrv]+=q-8;
+		if (quarterTrackPos[curDrv] < 0)	quarterTrackPos[curDrv] = 0;
+		if (quarterTrackPos[curDrv] >= MAX_TRACKS_PER_DISK*8-4)	quarterTrackPos[curDrv] = MAX_TRACKS_PER_DISK*8-4;
+
+		//showDiskMotor(address, q);
+	}
+
+	disk[curDrv].track = (quarterTrackPos[curDrv] + 1) / 4;
 }
 
+//inline
+void setDrv(int drv) {
+	disk[drv].motorOn = disk[!drv].motorOn || disk[drv].motorOn;                  // if any of the motors were ON
+	disk[!drv].motorOn = false;                                                   // motor of the other drive is set to OFF
+	curDrv = drv;    // set the current drive
+}
+
+void apple2_reset()
+{
+	KBD   = 0;			// $C000, $C010 ascii value of keyboard input
+	TEXT  = true;		// $C050 CLRTEXT  / $C051 SETTEXT
+	MIXED = false;		// $C052 CLRMIXED / $C053 SETMIXED
+	PAGE2 = false;		// $C054 PAGE2 off / $C055 PAGE2 on
+	HIRES = false;		// $C056 GR       / $C057 HGR
+	LCWR  = true;		// Language Card writable
+	LCRD  = false;		// Language Card readable
+	LCBK2 = true;		// Language Card bank 2 enabled
+	LCWFF = false;		// Language Card pre-write flip flop
+}
 
 //========================================== MEMORY MAPPED SOFT SWITCHES HANDLER
 // this function is called from readMem and writeMem
@@ -228,8 +435,8 @@ uint8_t softSwitches(uint16_t address, uint8_t value, bool WRT) {
   	case 0xC000: return KBD;                                                    // KEYBOARD
   	case 0xC010: KBD &= 0x7F; return KBD;                                       // KBDSTROBE
 
-  	case 0xC020:                                                                // TAPEOUT (shall we listen it ? - try SAVE from applesoft)
-  	case 0xC030:                                                                // SPEAKER
+  	case 0xC020:   // TAPEOUT (shall we listen it ? - try SAVE from applesoft)
+  	case 0xC030:   // SPEAKER
   	case 0xC033: playSound(); break;                                            // apple invader uses $C033 to output sound !
 
   	case 0xC050: TEXT  = false; break;                                          // Graphics
@@ -249,7 +456,7 @@ uint8_t softSwitches(uint16_t address, uint8_t value, bool WRT) {
 
   	case 0xC070: resetPaddles(); break;                                         // paddle timer RST
 
-    case 0xC080:                                                                // LANGUAGE CARD :
+    case 0xC080:   // LANGUAGE CARD :
   	case 0xC084: LCBK2 = 1; LCRD = 1; LCWR = 0;      LCWFF = 0;    break;       // LC2RD
   	case 0xC081:
   	case 0xC085: LCBK2 = 1; LCRD = 0; LCWR |= LCWFF; LCWFF = !WRT; break;       // LC2WR
@@ -266,33 +473,34 @@ uint8_t softSwitches(uint16_t address, uint8_t value, bool WRT) {
   	case 0xC08B:
   	case 0xC08F: LCBK2 = 0; LCRD = 1; LCWR |= LCWFF; LCWFF = !WRT; break;       // LC1RW
 
-		case 0xC0E0:
-		case 0xC0E1:
-		case 0xC0E2:
-		case 0xC0E3:
-		case 0xC0E4:
+	case 0xC0E0:
+	case 0xC0E1:
+	case 0xC0E2:
+	case 0xC0E3:
+	case 0xC0E4:
     case 0xC0E5:
-		case 0xC0E6:
-		case 0xC0E7: stepMotor(address); break;                                     // MOVE DRIVE HEAD
+	case 0xC0E6:
+	case 0xC0E7: stepMotorQ(address); break;                                     // MOVE DRIVE HEAD
+	//case 0xC0E7: stepMotor(address); break;                                     // MOVE DRIVE HEAD
 
-  	case 0xCFFF:
+  	//case 0xCFFF:
   	case 0xC0E8: disk[curDrv].motorOn = false; break;                           // MOTOROFF
   	case 0xC0E9: disk[curDrv].motorOn = true;  break;                           // MOTORON
 
   	case 0xC0EA: setDrv(0); break;                                              // DRIVE0EN
   	case 0xC0EB: setDrv(1); break;                                              // DRIVE1EN
 
-  	case 0xC0EC:                                                                // Shift Data Latch
+  	case 0xC0EC:   // Shift Data Latch
   		if (disk[curDrv].writeMode)                                               // writting
   			disk[curDrv].data[disk[curDrv].track*0x1A00+disk[curDrv].nibble]=dLatch;// good luck gcc
-  		else                                                                      // reading
+  		else         // reading
   			dLatch=disk[curDrv].data[disk[curDrv].track*0x1A00+disk[curDrv].nibble];// easy peasy
   		disk[curDrv].nibble = (disk[curDrv].nibble + 1) % 0x1A00;                 // turn floppy of 1 nibble
   		return dLatch;
 
   	case 0xC0ED: dLatch = value; break;                                         // Load Data Latch
 
-  	case 0xC0EE:                                                                // latch for READ
+  	case 0xC0EE:   // latch for READ
   		disk[curDrv].writeMode = false;
   		return disk[curDrv].readOnly ? 0x80 : 0;                                  // check protection
 
@@ -350,31 +558,255 @@ void writeMem(uint16_t address, uint8_t value) {
 	}
 }
 
+void CpuExec(unsigned long long int cycleCount)
+{
+	unsigned int cycles_count=0;
+	unsigned int cycles=0;
+
+	while(cycles_count<cycleCount) {
+		cycles=puce6502Step();
+		cycles_count += cycles;
+		ticks += cycles;
+
+#ifdef DASM_6502
+		char disasm[256];
+		dasm(getPC(), disasm);
+		LOG("%s\n", disasm);
+#endif
+	}
+}
+
+void SysInit()
+{
+}
+
+void SysReset()
+{
+	apple2_reset();
+
+	// reset the CPU
+	puce6502RST();   // reset the 6502
+}
+
+//=======================================================================
+/*
+int readBinFile(uint8_t *buf, uint32_t sz, char *fn, char* workdir, int wd_len)
+{
+	int r = 0;
+	FILE *f;
+	char msg[512];
+	workdir[wd_len] = 0;
+
+	f = fopen(strncat(workdir, fn, 256), "rb");              // load the file
+
+	if (f) {
+		if (fread(buf, 1, sz, f) != sz) {                             // the file is too small
+			sprintf(msg, "%s should be exactly %d %s", fn, (sz>=1024)?sz/1024:sz, (sz>=1024)?"KB":"bytes");
+			r=1;
+		}
+		fclose(f);
+	} else {
+		sprintf(msg, "Could not locate %s in the rom folder", fn);
+		r=2;
+	}
+
+	if(r)
+		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Fatal error", msg, NULL);
+
+	return r;
+}
+*/
+
+
+#ifdef LOADDSK
+#include "dsk.h"
+#endif
 
 //========================================================== PROGRAM ENTRY POINT
 
 int main(int argc, char *argv[]) {
 
-
 	//========================================================= SDL INITIALIZATION
-
 	int zoom = 2;
+	int fullscreen = 0;
+	int color_mode = 0;
+
 	uint8_t tries = 0;                                                            // for disk ][ speed-up access
 	SDL_Event event;
 	SDL_bool running = true, paused = false, ctrl = false, shift = false, alt = false;
 
+#ifdef LOADDSK
+	fullscreen = 1;
+#endif
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
 		printf("failed to initialize SDL2 : %s", SDL_GetError());
 		return -1;
 	}
 
-	SDL_Window *wdo = SDL_CreateWindow("Reinette ][+", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 280 * zoom, 192 * zoom, SDL_WINDOW_OPENGL);
-	SDL_Renderer *rdr = SDL_CreateRenderer(wdo, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-	SDL_SetRenderDrawBlendMode(rdr, SDL_BLENDMODE_NONE);                          // SDL_BLENDMODE_BLEND);
+	//SDL_Window *wdo = SDL_CreateWindow("Reinette ][+", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_RES_W * zoom, SCREEN_RES_H * zoom, SDL_WINDOW_OPENGL);
+	SDL_Window *wdo = SDL_CreateWindow("Reinette ][+", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_RES_W * zoom, SCREEN_RES_H * zoom, SDL_WINDOW_RESIZABLE);
+#ifdef SDL_RDR_SOFTWARE
+	SDL_Renderer *rdr = SDL_CreateRenderer(wdo, -1, SDL_RENDERER_SOFTWARE);
+	//SDL_Renderer *rdr = SDL_CreateRenderer(wdo, -1, SDL_RENDERER_SOFTWARE | SDL_RENDERER_PRESENTVSYNC);	// SDL_RENDERER_PRESENTVSYNC 无效
+#else
+	SDL_Renderer *rdr = SDL_CreateRenderer(wdo, -1, SDL_RENDERER_ACCELERATED);
+	//SDL_Renderer *rdr = SDL_CreateRenderer(wdo, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+#endif
+	//SDL_SetRenderDrawBlendMode(rdr, SDL_BLENDMODE_NONE);                          // SDL_BLENDMODE_BLEND);
 	SDL_EventState(SDL_DROPFILE, SDL_ENABLE);                                     // ask SDL2 to read dropfile events
-	SDL_RenderSetScale(rdr, zoom, zoom);
+	//SDL_RenderSetScale(rdr, zoom, zoom);
 	SDL_Surface *sshot;                                                           // used later for the screenshots
 
+	SDL_SetWindowMinimumSize(wdo, SCREEN_RES_W, SCREEN_RES_H);
+
+	if(fullscreen) SDL_SetWindowFullscreen(wdo, SDL_WINDOW_FULLSCREEN_DESKTOP);
+
+	unsigned char screenData[SCREEN_RES_W*SCREEN_RES_H];
+	SDL_Color colors[128+32];
+
+	SDL_Surface *sdlSurface = SDL_CreateRGBSurface(0, SCREEN_RES_W, SCREEN_RES_H, 32, 0,0,0,0);
+	SDL_Surface *sdlScreen = SDL_CreateRGBSurfaceFrom((void*)screenData, SCREEN_RES_W, SCREEN_RES_H, SCREEN_BPP, SCREEN_RES_W*1, 0, 0, 0, 0);
+
+/*
+	const int color[16][3] = {                                                    // the 16 low res colors
+		{ 0,   0,   0	  }, { 226, 57,  86  }, { 28,  116, 205 }, { 126, 110, 173 },
+		{ 31,  129, 128 }, { 137, 130, 122 }, { 86,  168, 228 }, { 144, 178, 223 },
+		{ 151, 88,  34	}, { 234, 108, 21  }, { 158, 151, 143 }, { 255, 206, 240 },
+		{ 144, 192, 49	}, { 255, 253, 166 }, { 159, 210, 213 }, { 255, 255, 255 }
+	};
+*/
+	// mame
+	const int color[16][3] = {                                                    // the 16 low res colors
+		{0x00, 0x00, 0x00}, // Black
+		{0xa7, 0x0b, 0x40}, // Dark Red
+		{0x40, 0x1c, 0xf7}, // Dark Blue
+		{0xe6, 0x28, 0xff}, // Purple
+		{0x00, 0x74, 0x40}, // Dark Green
+		{0x80, 0x80, 0x80}, // Dark Gray
+		{0x19, 0x90, 0xff}, // Medium Blue
+		{0xbf, 0x9c, 0xff}, // Light Blue
+
+		{0x40, 0x63, 0x00}, // Brown
+		{0xe6, 0x6f, 0x00}, // Orange
+		{0x80, 0x80, 0x80}, // Light Grey
+		{0xff, 0x8b, 0xbf}, // Pink
+		{0x19, 0xd7, 0x00}, // Light Green
+		{0xbf, 0xe3, 0x08}, // Yellow
+		{0x58, 0xf4, 0xbf}, // Aquamarine
+		{0xff, 0xff, 0xff}  // White
+	};
+
+// 黑  深红 深蓝 紫   灰  蓝   浅蓝 深橙
+// 棕  橙   灰   深红 绿  浅橙 浅绿 白
+
+	const int hcolor[16][3] = {                                                   // the high res colors (2 light levels)
+		{ 0,   0,   0   }, { 144, 192, 49  }, { 126, 110, 173 }, { 255, 255, 255 },
+		{ 0,   0,   0   }, { 234, 108, 21  }, { 86,  168, 228 }, { 255, 255, 255 },
+		{ 0,   0,   0   }, { 63,  55,  86  }, { 72,  96,  25  }, { 255, 255, 255 },
+		{ 0,   0,   0   }, { 43,  84,  114 }, { 117, 54,  10  }, { 255, 255, 255 }
+	};
+
+	const int hcolor_5[32][3] = {                                                   // the high res colors (2 light levels)
+		{ 0,   0,   0   },	// 00 000 黑
+		{ 0,   0,   0   },	// 00 001 ？黑
+		{ 255, 0,   255 },	// 00 010 紫
+		{ 255, 255, 255 },	// 00 011 白
+		{ 0,   0,   0   },	// 00 100 ？黑
+		{ 0,   0,   0   },	// 00 101 ？黑
+		{ 255, 255, 255 },	// 00 110 白
+		{ 255, 255, 255 },	// 00 111 白
+
+		{ 0,   0,   0   }, 	// 01 000 黑
+		{ 0,   0,   0   },	// 01 001 ？黑
+		{ 0,   0,   255 },	// 01 010 绿
+		{ 255, 255, 255 },	// 01 011 白
+		{ 0,   0,   0   },	// 01 100 ？黑
+		{ 0,   0,   0   },	// 01 101 ？黑
+		{ 255, 255, 255 },	// 01 110 白
+		{ 255, 255, 255 },	// 01 111 白
+
+		{ 0,   0,   0   },	// 10 000 黑
+		{ 0,   0,   0   },	// 10 001 ？黑
+		//{ 0,   160, 255 },	// 10 010 蓝
+		{ 50,  170, 220 },	// 10 010 蓝
+		{ 255, 255, 255 },	// 10 011 白
+		{ 0,   0,   0   },	// 10 100 ？黑
+		{ 0,   0,   0   },	// 10 101 ？黑
+		{ 255, 255, 255 },	// 10 110 白
+		{ 255, 255, 255 },	// 10 111 白
+
+		{ 0,   0,   0   }, 	// 11 000 黑
+		{ 0,   0,   0   },	// 11 001 ？黑
+		//{ 255, 128, 64  },	// 11 010 橙
+		{ 255, 108, 64  },	// 11 010 橙
+		{ 255, 255, 255 },	// 11 011 白
+		{ 0,   0,   0   },	// 11 100 ？黑
+		{ 0,   0,   0   },	// 11 101 ？黑
+		{ 255, 255, 255 },	// 11 110 白
+		{ 255, 255, 255 }	// 11 111 白
+	};
+
+	Uint8 color_r, color_g, color_b;
+	int color_off;
+
+	// color
+	color_off = 0;
+	for(int i=0;i<16;i++) {
+		colors[i+color_off].r = color[i][0]; colors[i+color_off].g = color[i][1]; colors[i+color_off].b = color[i][2]; colors[i+color_off].a = 0xff;
+	}
+	for(int i=0;i<16;i++) {
+		colors[i+color_off+16].r = hcolor[i][0]; colors[i+color_off+16].g = hcolor[i][1]; colors[i+color_off+16].b = hcolor[i][2]; colors[i+color_off+16].a = 0xff;
+	}
+
+	// green
+	color_off = 32;
+	color_r=color_g=color_b=0;
+	for(int i=0;i<16;i++) {
+		colors[i+color_off].r = color_r; colors[i+color_off].g = color_g; colors[i+color_off].b = color_b; colors[i+color_off].a = 0xff;
+		color_g+=0x10;
+	}
+
+	color_r=color_g=color_b=0;
+	for(int i=0;i<2;i++) {
+		colors[i+color_off+16].r = color_r; colors[i+color_off+16].g = color_g; colors[i+color_off+16].b = color_b; colors[i+color_off+16].a = 0xff;
+		color_g+=0xf0;
+	}
+
+	// gamber
+	color_off = 32*2;
+	color_r=color_g=color_b=0;
+	for(int i=0;i<16;i++) {
+		colors[i+color_off].r = color_r; colors[i+color_off].g = color_g; colors[i+color_off].b = color_b; colors[i+color_off].a = 0xff;
+		color_r+=0x10;color_g+=0x08;
+	}
+
+	color_r=color_g=color_b=0;
+	for(int i=0;i<2;i++) {
+		colors[i+color_off+16].r = color_r; colors[i+color_off+16].g = color_g; colors[i+color_off+16].b = color_b; colors[i+color_off+16].a = 0xff;
+		color_r+=0xf0;color_g+=0x78;
+	}
+
+	// white
+	color_off = 32*3;
+	color_r=color_g=color_b=0;
+	for(int i=0;i<16;i++) {
+		colors[i+color_off].r = color_r; colors[i+color_off].g = color_g; colors[i+color_off].b = color_b; colors[i+color_off].a = 0xff;
+		color_r+=0x10;color_g+=0x10;color_b+=0x10;
+	}
+
+	color_r=color_g=color_b=0;
+	for(int i=0;i<2;i++) {
+		colors[i+color_off+16].r = color_r; colors[i+color_off+16].g = color_g; colors[i+color_off+16].b = color_b; colors[i+color_off+16].a = 0xff;
+		color_r+=0xf0;color_g+=0xf0;color_b+=0xf0;
+	}
+
+	// 5 bits
+	color_off = 32*4;
+	for(int i=0;i<32;i++) {
+		colors[i+color_off].r = hcolor_5[i][0]; colors[i+color_off].g = hcolor_5[i][1]; colors[i+color_off].b = hcolor_5[i][2]; colors[i+color_off].a = 0xff;
+	}
+
+	SDL_SetPaletteColors(sdlScreen->format->palette, colors, 0, 128+32);
 
 	//=================================================== SDL AUDIO INITIALIZATION
 
@@ -388,41 +820,17 @@ int main(int argc, char *argv[]) {
 		audioBuffer[false][i] = -volume;                                            // the other when SPKR is false
 	}
 
-
 	//===================================== VARIABLES USED IN THE VIDEO PRODUCTION
 
 	int TextCache[24][40] = { 0 };
 	int LoResCache[24][40] = { 0 };
-	int HiResCache[192][40] = { 0 };                                              // check which Hi-Res 7 dots needs redraw
-	uint8_t previousBit[192][40] = { 0 };                                         // the last bit value of the byte before.
+	//int HiResCache[192][40] = { 0 };                                              // check which Hi-Res 7 dots needs redraw
+	//uint8_t previousBit[192][40] = { 0 };                                         // the last bit value of the byte before.
 
 	enum characterAttribute { A_NORMAL, A_INVERSE, A_FLASH } glyphAttr;           // character attribute in TEXT
 	uint8_t flashCycle = 0;                                                       // TEXT cursor flashes at 2Hz
 
 	SDL_Rect drvRect[2] = { { 272, 188, 4, 4 }, { 276, 188, 4, 4 } };             // disk drive status squares
-	SDL_Rect pixelGR = { 0, 0, 7, 4 };                                            // a block in LoRes
-	SDL_Rect dstRect = { 0, 0, 7, 8 };                                            // the dst character in rdr
-	SDL_Rect charRects[128];                                                      // the src from the norm and rev textures
-	for (int c = 0; c < 128; c++) {                                               // index of the array = ascii code
-		charRects[c].x = 7 * c;
-		charRects[c].y = 0;
-		charRects[c].w = 7;
-		charRects[c].h = 8;
-	}
-
-	const int color[16][3] = {                                                    // the 16 low res colors
-		{ 0,   0,   0	  }, { 226, 57,  86  }, { 28,  116, 205 }, { 126, 110, 173 },
-		{ 31,  129, 128 }, { 137, 130, 122 }, { 86,  168, 228 }, { 144, 178, 223 },
-		{ 151, 88,  34	}, { 234, 108, 21  }, { 158, 151, 143 }, { 255, 206, 240 },
-		{ 144, 192, 49	}, { 255, 253, 166 }, { 159, 210, 213 }, { 255, 255, 255 }
-	};
-
-	const int hcolor[16][3] = {                                                   // the high res colors (2 light levels)
-		{ 0,   0,   0   }, { 144, 192, 49  }, { 126, 110, 173 }, { 255, 255, 255 },
-		{ 0,   0,   0   }, { 234, 108, 21  }, { 86,  168, 228 }, { 255, 255, 255 },
-		{ 0,   0,   0   }, { 63,  55,	 86  }, { 72,  96,  25	}, { 255, 255, 255 },
-		{ 0,   0,   0   }, { 43,  84,	 114 }, { 117, 54,  10	}, { 255, 255, 255 }
-	};
 
 	const int offsetGR[24] = {                                                    // helper for TEXT and GR video generation
 		0x0000, 0x0080, 0x0100, 0x0180, 0x0200, 0x0280, 0x0300, 0x0380,             // lines 0-7
@@ -467,69 +875,81 @@ int main(int argc, char *argv[]) {
 		if (argv[0][++i] == '\\') workDirSize = i + 1;                              // find the last '/' if any
 	}
 
-	SDL_Surface *tmpSurface;
-	workDir[workDirSize] = 0;
-	tmpSurface = SDL_LoadBMP(strncat(workDir, "assets/font-normal.bmp", 23));     // load the normal font
-	SDL_Texture *normCharTexture = SDL_CreateTextureFromSurface(rdr, tmpSurface);
-	SDL_FreeSurface(tmpSurface);
-
-	workDir[workDirSize] = 0;
-	tmpSurface = SDL_LoadBMP(strncat(workDir, "assets/font-reverse.bmp", 24));    // load the reverse font
-	SDL_Texture *revCharTexture = SDL_CreateTextureFromSurface(rdr, tmpSurface);
-	SDL_FreeSurface(tmpSurface);
-
-
 	//================================================================== LOAD ROMS
 
-	workDir[workDirSize] = 0;
-	FILE *f = fopen(strncat(workDir, "rom/appleII+.rom", 17), "rb");              // load the Apple II+ ROM
-	if (!f) {
-		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Fatal error", "Could not locate appleII+.rom in the rom folder", NULL);
-		return 1;                                                                   // exit
-	}
-	if (fread(rom, 1, ROMSIZE, f) != ROMSIZE) {                                   // the file is too small
-		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Fatal error", "appleII+.rom should be exactly 12 KB", NULL);
-		return 1;                                                                   // exit
-	}
-	fclose(f);
+/*
+	if(readBinFile(rom,     ROMSIZE,     "roms/apple2/appleII+.rom", workDir, workDirSize)) return 1;
+	if(readBinFile(fontrom, FONTROMSIZE, "roms/apple2/a2.chr",       workDir, workDirSize)) return 1;
+#ifdef ENABLE_SL6
+	if(readBinFile(sl6,     SL6SIZE,     "roms/apple2/diskII.rom",   workDir, workDirSize)) return 1;
+#endif
+*/
+	memcpy(rom, apple2p_rom, ROMSIZE);
+#ifdef ENABLE_SL6
+	memcpy(sl6, disk2rom, SL6SIZE);
+#endif
 
-	workDir[workDirSize] = 0;
-	f = fopen(strncat(workDir, "rom/diskII.rom", 15), "rb");                      // load the P5A disk ][ PROM
-	if (!f) {
-		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Fatal error", "Could not locate diskII.rom in the rom folder", NULL);
-		return 1;                                                                   // exit
-	}
-	if (fread(sl6, 1, 256, f) != 256) {                                           // file too small
-		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Fatal error", "diskII.rom should be exactly 256 bytes", NULL);
-		return 1;                                                                   // exit
-	}
-	fclose(f);
-
+	SysInit();
 
 	//========================================================== VM INITIALIZATION
 
-	if (argc > 1) insertFloppy(wdo, argv[1], 0);                                  // load floppy if provided at command line
+	if (argc > 1)
+		insertFloppy(wdo, argv[1], 0);                                  // load floppy if provided at command line
+#ifdef LOADDSK
+	else {
 
-	// reset the CPU
-	puce6502RST();                                                                // reset the 6502
+		if(fexist(dsk1_fn))
+			insertFloppy(wdo, dsk1_fn, 0);
+		else
+			loadFloppy(wdo, dsk1_fn, dsk1_data, dsk1_len, 0);
+
+#ifdef DOUBLE_DISK
+		if(fexist(dsk2_fn))
+			insertFloppy(wdo, dsk2_fn, 1);
+		else
+			loadFloppy(wdo, dsk2_fn, dsk2_data, dsk2_len, 1);
+#endif // DOUBLE_DISK
+
+	}
+
+#else
+/*
+	else {
+		// STC2.0
+		color_mode = 1;
+		insertFloppy(wdo, "stc.sy.dsk", 0);
+		insertFloppy(wdo, "stc.lib.dsk", 1);
+	}
+*/
+#endif
+
+	SysReset();
 
 	// dirty hack, fix soon... if I understand why
 	ram[0x4D] = 0xAA;   // Joust crashes if this memory location equals zero
 	ram[0xD0] = 0xAA;   // Planetoids won't work if this memory location equals zero
 
-
 	//================================================================== MAIN LOOP
+	uint64_t ticks_step=1;
+	uint64_t last_ticks = SDL_GetTicks64();
+	uint64_t current_ticks;
 
 	while (running) {
 
-		if (!paused) {                                                              // the apple II is clocked at 1023000.0 Hhz
-			puce6502Exec(17050);                                                      // execute instructions for 1/60 of a second
+		if (!paused) { // the apple II is clocked at 1023000.0 Hhz
+			//puce6502Exec(17050);                                                      // execute instructions for 1/60 of a second
+			//while (disk[curDrv].motorOn && ++tries)                                   // until motor is off or i reaches 255+1=0
+			//	puce6502Exec(5000);                                                     // speed up drive access artificially
+
+			CpuExec(17050);                                                      // execute instructions for 1/60 of a second
 			while (disk[curDrv].motorOn && ++tries)                                   // until motor is off or i reaches 255+1=0
-				puce6502Exec(5000);                                                     // speed up drive access artificially
+				CpuExec(5000);                                                     // speed up drive access artificially
 		}
 
 
 		//=============================================================== USER INPUT
+
+		while(1) {
 
 		while (SDL_PollEvent(&event)) {
 			alt   = SDL_GetModState() & KMOD_ALT   ? true : false;
@@ -550,14 +970,16 @@ int main(int argc, char *argv[]) {
 
 			if (event.type == SDL_DROPFILE) {                                         // user dropped a file
 				char *filename = event.drop.file;                                       // get full pathname
-				if (!insertFloppy(wdo, filename, alt))                                  // if ALT is pressed : drv 1 else drv 0
+				if (!insertFloppy(wdo, filename, alt)) {                                  // if ALT is pressed : drv 1 else drv 0
+					if(fullscreen) {SDL_SetWindowFullscreen(wdo, 0); fullscreen=0;}
 					SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Load", "Not a valid nib file", NULL);
+				}
 				SDL_free(filename);                                                     // free filename memory
 				paused = false;                                                         // might already be the case
 
 				if (!(alt || ctrl)) {                                                   // if ALT or CTRL were not pressed
 					ram[0x3F4] = 0;                                                       // unset the Power-UP byte
-					puce6502RST();                                                        // do a cold reset
+					SysReset();                                                        // do a cold reset
 					memset(ram, 0, sizeof(ram));
 				}
 			}
@@ -567,22 +989,38 @@ int main(int argc, char *argv[]) {
 
 				// EMULATOR CONTROLS :
 
-				case SDLK_F1:                                                           // SAVES
-					if (ctrl) {
-						if (saveFloppy(0))
-							SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Save", "\nDisk 1 saved back to file\n", NULL);
-						else
-							SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Save", "\nTError while saving Disk 1\n", NULL);
-					} else if (alt) {
-						if (saveFloppy(1))
-							SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Save", "\nDisk 2 saved back to file\n", NULL);
-						else
-							SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Save", "\nError while saving Disk 2\n", NULL);
-					} else {
-						SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "Save", "CTRL-F1 to save D1\nALT-F1 to save D2\n", NULL);
-					}
+				case SDLK_F1:                                                          // help box
+					if(fullscreen) {SDL_SetWindowFullscreen(wdo, 0); fullscreen=0;}
+					SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Help",
+						"\tReinette ][ plus v0.4.8\n"
+						"\n"
+						"F1\tthis help\n"
+						"\n"
+						"F2\tsave a screenshot into the screenshots directory\n"
+						"F3\tpaste text from clipboard\n"
+						"\n"
+						"F4\tmute / un-mute sound\n"
+						"shift/ctrl F4\tincrease/decrease volume\n"
+						"\n"
+						"F5\treset joystick release speed\n"
+						"shift/ctrl F5\tincrease/decrease joystick release speed\n"
+						"\n"
+						"F6\treset joystick action speed\n"
+						"shift/ctrl F6\tincrease/decrease joystick action speed\n"
+						"\n"
+						"F7\tfullscreen\n"
+						"shift/ctrl F7\tincrease zoom up/down to 6/1\n"
+						"\n"
+						"ctrl F9\twrites the changes of the floppy in drive 0\n"
+						"alt F9\twrites the changes of the floppy in drive 1\n"
+						"\n"
+						"F11\tpause / un-pause the emulator\n"
+						"\n"
+						"ctrl F12\treset\n"
+						"\n"
+						"More information at github.com/ArthurFerreira2\n", NULL);
+						{ticks_step=1;last_ticks=SDL_GetTicks64();}
 				break;
-
 
 				case SDLK_F2: {                                                         // SCREENSHOTS
 					sshot = SDL_GetWindowSurface(wdo);
@@ -640,50 +1078,47 @@ int main(int argc, char *argv[]) {
 				break;
 
 				case SDLK_F7:                                                           // ZOOM
-					if (shift && (zoom < 8)) zoom++;                                      // zoom in
-					if (ctrl && (zoom > 1)) zoom--;                                       // zoom out
-					if (!ctrl && !shift) zoom = 2;                                        // reset zoom to 2
-					SDL_SetWindowSize(wdo, 280 * zoom, 192 * zoom);                       // update window size
-					SDL_RenderSetScale(rdr, zoom, zoom);                                  // update renderer size
+					if (!ctrl && !shift) {
+						fullscreen = fullscreen?0:1;
+						SDL_SetWindowFullscreen(wdo, fullscreen?SDL_WINDOW_FULLSCREEN_DESKTOP:0);
+					}
+					if (!fullscreen) {
+						if(ctrl && (zoom>1)) {	// zoom out
+							zoom--;
+							SDL_SetWindowSize(wdo, SCREEN_RES_W * zoom, SCREEN_RES_H * zoom);
+						}
+						if(shift && (zoom<6)) {	// zoom in
+							zoom++;
+							SDL_SetWindowSize(wdo, SCREEN_RES_W * zoom, SCREEN_RES_H * zoom);
+						}
+					}
+					break;
+
+				case SDLK_F8: color_mode++; color_mode%=4; break;                                  // color mode
+
+				case SDLK_F9:                                                           // SAVES
+					if(fullscreen) {SDL_SetWindowFullscreen(wdo, 0); fullscreen=0;}
+					if (ctrl) {
+						if (saveFloppy(0))
+							SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Save", "\nDisk 1 saved back to file\n", NULL);
+						else
+							SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Save", "\nTError while saving Disk 1\n", NULL);
+					} else if (alt) {
+						if (saveFloppy(1))
+							SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Save", "\nDisk 2 saved back to file\n", NULL);
+						else
+							SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Save", "\nError while saving Disk 2\n", NULL);
+					} else {
+						SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "Save", "CTRL-F9 to save D1\nALT-F9 to save D2\n", NULL);
+					}
+					{ticks_step=1;last_ticks=SDL_GetTicks64();}
 				break;
 
-				case SDLK_F10: paused = !paused; break;                                  // toggle pause
+				case SDLK_F10: debug = debug?0:1;break;
 
-				case SDLK_F11: puce6502RST(); break;                                    // simulate a reset
+				case SDLK_F11: paused = !paused; if(!paused){ticks_step=1;last_ticks=SDL_GetTicks64();} break;                                  // toggle pause
 
-				case SDLK_F12:                                                          // help box
-					SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Help",
-						  "\tReinette ][ plus v0.4.8\n"
-							"\n"
-              "ctrl F1\twrites the changes of the floppy in drive 0\n"
-              "alt F1\twrites the changes of the floppy in drive 1\n"
-              "\n"
-							"F2\tsave a screenshot into the screenshots directory\n"
-              "F3\tpaste text from clipboard\n"
-              "\n"
-							"F4\tmute / un-mute sound\n"
-              "shift F4\tincrease volume\n"
-              "ctrl F4\tdecrease volume\n"
-              "\n"
-							"F5\treset joystick release speed\n"
-              "shift F5\tincrease joystick release speed\n"
-              "crtl F5\tdecrease joystick release speed\n"
-              "\n"
-							"F6\treset joystick action speed\n"
-              "shift F6\tincrease joystick action speed\n"
-              "crtl F6\tdecrease joystick action speed\n"
-              "\n"
-							"F7\treset zoom to 2:1\n"
-              "shift F7\tincrease zoom up to 8:1\n"
-              "ctrl F7\tdecrease zoom down to 1:1\n"
-							"\n"
-              "F10\tpause / un-pause the emulator\n"
-							"F11\treset\n"
-              "\n"
-							"F12\tthis help\n"
-              "\n"
-							"More information at github.com/ArthurFerreira2\n", NULL);
-				break;
+				case SDLK_F12: if (ctrl) SysReset(); break;                     // simulate a reset
 
 				// EMULATED KEYS :
 
@@ -765,25 +1200,64 @@ int main(int argc, char *argv[]) {
 				GCP[pdl] += GCD[pdl] * GCActionSpeed;
 				if (GCP[pdl] > 255) GCP[pdl] = 255;
 				if (GCP[pdl] < 0)   GCP[pdl] = 0;
-			} else {                                                                  // the stick is return back to center
+			} else {     // the stick is return back to center
 				GCP[pdl] += GCD[pdl] * GCReleaseSpeed;
 				if (GCD[pdl] == 1  && GCP[pdl] > 127) GCP[pdl] = 127;
 				if (GCD[pdl] == -1 && GCP[pdl] < 127) GCP[pdl] = 127;
 			}
 		}
 
+		current_ticks = SDL_GetTicks64();
+		if( current_ticks-last_ticks > ticks_step*50/3 ) {		// ticks_step*1000/60 == ticks_step*50/3
+			ticks_step++;
+			//if(current_ticks-last_ticks>=1000 && ticks_step>=60) {last_ticks+=1000;ticks_step-=60;}
+			break;
+		}
+
+		}	// while
 
 		//============================================================= VIDEO OUTPUT
 
 		// HIGH RES GRAPHICS
 		if (!TEXT && HIRES) {
 			uint16_t word;
-			uint8_t bits[16], bit, pbit, colorSet, even;
+			uint8_t bit, colorSet, even;
 			uint16_t vRamBase = 0x2000 + PAGE2 * 0x2000;
 			uint8_t lastLine = MIXED ? 160 : 192;
-			uint8_t colorIdx = 0;                                                     // to index the color arrays
+			uint16_t byte_1, byte_2;
+			//uint8_t bits[16], pbit;
+			//uint8_t colorIdx = 0;                                                     // to index the color arrays
 
 			for (int line = 0; line < lastLine; line++) {                             // for every line
+				int off = line*280;
+
+				word = 0;
+				byte_1 = ram[vRamBase + offsetHGR[line] + 0+0];
+				byte_2 = 0;
+				even = 0;
+				for (int col = 0; col < 40; col ++) {                                 // for every 7 horizontal dots
+					if(col==39)
+						byte_2 = 0;
+					else
+						byte_2 = ram[vRamBase + offsetHGR[line] + col+1];
+
+					colorSet = (byte_1&0x80)?16:0;
+					word = word | ((byte_1&0x007f)<<1) | ((byte_2&0x0001)<<8);
+
+					for (bit=0; bit<7; bit++) {
+						if(color_mode)
+							screenData[off] = color_mode*32+16+ ((byte_1>>bit)&1);
+						else
+							screenData[off] = 32*4+((word>>bit)&7) + even + colorSet;
+						even = even?0:8;
+						off++;
+					}
+
+					word = (byte_1>>6)&1;
+					byte_1=byte_2;
+				}
+
+/*
 				for (int col = 0; col < 40; col += 2) {                                 // for every 7 horizontal dots
 					int x = col * 7;
 					even = 0;
@@ -792,7 +1266,6 @@ int main(int argc, char *argv[]) {
 					word +=           ram[vRamBase + offsetHGR[line] + col];              // in reverse order
 
 					if (HiResCache[line][col] != word || !flashCycle) {                   // check if this group of 7 dots need a redraw
-
 						for (bit=0; bit < 16; bit++)                                        // store all bits 'word' into 'bits'
 							bits[bit] = (word >> bit) & 1;
 						colorSet = bits[7] * 4;                                             // select the right color set
@@ -804,9 +1277,11 @@ int main(int argc, char *argv[]) {
 								colorSet = bits[15] * 4;                                        // update the color set
 								bit++;                                                          // skip bit 7
 							}
-							colorIdx = even + colorSet + (bits[bit] << 1) + (pbit);
-							SDL_SetRenderDrawColor(rdr, hcolor[colorIdx][0], hcolor[colorIdx][1], hcolor[colorIdx][2], SDL_ALPHA_OPAQUE);
-							SDL_RenderDrawPoint(rdr, x++, line);
+							if(color_mode)
+								colorIdx = color_mode*32+bits[bit];
+							else
+								colorIdx = even + colorSet + (bits[bit] << 1) + (pbit);
+							screenData[off+x] = colorIdx+16; x++;
 							pbit = bits[bit++];                                               // proceed to the next pixel
 							even = even ? 0 : 8;                                              // one pixel every two is darker
 						}
@@ -816,9 +1291,13 @@ int main(int argc, char *argv[]) {
 							previousBit[line][col + 2] = pbit;                                // set pbit and clear the
 							HiResCache[line][col + 2] = -1;                                   // video cache for next dot
 						}
-					}                                                                     // if (HiResCache[line][col] ...
+
+					}        // if (HiResCache[line][col] ...
 				}
+*/
+
 			}
+
 		}
 
 		// lOW RES GRAPHICS
@@ -829,22 +1308,32 @@ int main(int argc, char *argv[]) {
 			uint8_t colorIdx = 0;                                                     // to index the color arrays
 
 			for (int col = 0; col < 40; col++) {                                      // for each column
-				pixelGR.x = col * 7;
+				//pixelGR.x = col * 7;
 				for (int line = 0; line < lastLine; line++) {                           // for each row
-					pixelGR.y = line * 8;                                                 // first block
+					//pixelGR.y = line * 8;                                                 // first block
 
 					glyph = ram[vRamBase + offsetGR[line] + col];                         // read video memory
 					if (LoResCache[line][col] != glyph || !flashCycle) {
 						LoResCache[line][col] = glyph;
 
-						colorIdx = glyph & 0x0F;                                              // first nibble
-						SDL_SetRenderDrawColor(rdr, color[colorIdx][0], color[colorIdx][1], color[colorIdx][2], SDL_ALPHA_OPAQUE);
-						SDL_RenderFillRect(rdr, &pixelGR);
+						int off;
 
-						pixelGR.y += 4;                                                       // second block
+						colorIdx = glyph & 0x0F;                                              // first nibble
+						off = line*8*280+col*7;
+						for(int j=0;j<4;j++) for(int i=0;i<7;i++)
+							if(color_mode)
+								screenData[off+j*280+i] = colorIdx+color_mode*32;
+							else
+								screenData[off+j*280+i] = colorIdx;
+
+						//pixelGR.y += 4;                                                       // second block
 						colorIdx = (glyph & 0xF0) >> 4;                                       // second nibble
-						SDL_SetRenderDrawColor(rdr, color[colorIdx][0], color[colorIdx][1], color[colorIdx][2], SDL_ALPHA_OPAQUE);
-						SDL_RenderFillRect(rdr, &pixelGR);
+						off = (line*8+4)*280+col*7;
+						for(int j=0;j<4;j++) for(int i=0;i<7;i++)
+							if(color_mode)
+								screenData[off+j*280+i] = colorIdx+color_mode*32;
+							else
+								screenData[off+j*280+i] = colorIdx;
 					}
 				}
 			}
@@ -857,10 +1346,7 @@ int main(int argc, char *argv[]) {
 			uint8_t glyph;                                                            // a TEXT character
 
 			for (int col = 0; col < 40; col++) {                                      // for each column
-				dstRect.x = col * 7;
 				for (int line = firstLine; line < 24; line++) {                         // for each row
-					dstRect.y = line * 8;
-
 					glyph = ram[vRamBase + offsetGR[line] + col];                         // read video memory
 					if (glyph > 0x7F) glyphAttr = A_NORMAL;                               // is NORMAL ?
 					else if (glyph < 0x40) glyphAttr = A_INVERSE;                         // is INVERSE ?
@@ -873,24 +1359,34 @@ int main(int argc, char *argv[]) {
 						if (glyph > 0x5F) glyph &= 0x3F;                                      // shifts to match
 						if (glyph < 0x20) glyph |= 0x40;                                      // the ASCII codes
 
-						if (glyphAttr==A_NORMAL || (glyphAttr==A_FLASH && flashCycle<15))
-							SDL_RenderCopy(rdr, normCharTexture, &charRects[glyph], &dstRect);
-						else
-							SDL_RenderCopy(rdr, revCharTexture, &charRects[glyph], &dstRect);
+
+						int off = line*8*280+col*7;
+						uint8_t colorIdx_0, colorIdx_1;
+						uint8_t font_b;
+						if (glyphAttr==A_NORMAL || (glyphAttr==A_FLASH && flashCycle<15)) {
+							if(color_mode) {
+								colorIdx_0=0+color_mode*32; colorIdx_1=15+color_mode*32;
+							} else {
+								colorIdx_0=0; colorIdx_1=15;
+							}
+						} else {
+							if(color_mode) {
+								colorIdx_0=15+color_mode*32; colorIdx_1=0+color_mode*32;
+							} else {
+								colorIdx_0=15; colorIdx_1=0;
+							}
+						}
+
+						for(int j=0;j<8;j++) {
+							font_b = fontrom[glyph*8+j];
+							for(int i=0;i<7;i++) {
+								font_b = font_b<<1;
+								screenData[off+j*280+i] = (font_b&0x80)?colorIdx_1:colorIdx_0;
+							}
+						}
 					}
 				}
 			}
-		}
-
-
-		//====================================================== DISPLAY DISK STATUS
-
-		if (disk[curDrv].motorOn) {                                                 // drive is active
-			if (disk[curDrv].writeMode)
-				SDL_SetRenderDrawColor(rdr, 255, 0, 0, 85);                             // red for writes
-			else
-				SDL_SetRenderDrawColor(rdr, 0, 255, 0, 85);                             // green for reads
-			SDL_RenderFillRect(rdr, &drvRect[curDrv]);                                // square actually
 		}
 
 
@@ -898,11 +1394,32 @@ int main(int argc, char *argv[]) {
 
 		if (++flashCycle == 30)                                                     // increase cursor flash cycle
 			flashCycle = 0;                                                           // reset to zero every half second
+
+		Uint32 fmt = sdlSurface->format->format;
+		SDL_Surface *surf = SDL_ConvertSurfaceFormat(sdlScreen, fmt, 0);
+		SDL_BlitScaled(surf,NULL,sdlSurface,NULL);
+		SDL_FreeSurface(surf);
+
+		//====================================================== DISPLAY DISK STATUS
+		// red for writes
+		// green for reads
+		if (disk[curDrv].motorOn)                                                 // drive is active
+			SDL_FillRect(sdlSurface, &drvRect[curDrv],
+				(disk[curDrv].writeMode)?SDL_MapRGBA(sdlSurface->format, 255, 0, 0,85):SDL_MapRGBA(sdlSurface->format, 0, 255, 0,85) );
+
+		SDL_Texture *sdlTex;
+		sdlTex = SDL_CreateTextureFromSurface(rdr, sdlSurface);
+		SDL_RenderCopy(rdr, sdlTex, 0, 0);
+		SDL_DestroyTexture(sdlTex);
+
 		SDL_RenderPresent(rdr);                                                     // swap buffers
-	}                                                                             // while (running)
+	}                // while (running)
 
 
 	//================================================ RELEASE RESSOURSES AND EXIT
+
+	SDL_FreeSurface(sdlScreen);
+	SDL_FreeSurface(sdlSurface);
 
 	SDL_AudioQuit();
 	SDL_Quit();

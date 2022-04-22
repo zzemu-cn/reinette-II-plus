@@ -32,9 +32,9 @@
 #ifndef _PUCE6502_H
 #define _PUCE6502_H
 
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
-typedef enum { false, true } bool;
+//typedef unsigned char uint8_t;
+//typedef unsigned short uint16_t;
+//typedef enum { false, true } bool;
 
 extern unsigned long long int ticks;
 
@@ -43,9 +43,15 @@ void puce6502RST();
 void puce6502IRQ();
 void puce6502NMI();
 
+unsigned int puce6502Step();
+
 // void printRegs();
-// void dasm(uint16_t address);
-// void setPC(uint16_t address);
-// uint16_t getPC();
+void dasm(uint16_t address, char *buffer);
+void setPC(uint16_t address);
+uint16_t getPC();
+uint16_t getSP();
+uint8_t getA();
+uint8_t getX();
+uint8_t getY();
 
 #endif

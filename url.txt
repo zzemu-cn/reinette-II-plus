@@ -1,0 +1,14 @@
+https://github.com/ArthurFerreira2/reinette-II-plus
+https://github.com/ArthurFerreira2/puce6502
+https://github.com/stevecheckoway/libzel
+
+https://github.com/ArthurFerreira2/reinette-IIe
+https://github.com/ArthurFerreira2/puce65c02
+
+
+https://github.com/slotek/dsk2nib
+
+https://github.com/redcode/Z80
+https://github.com/cc65/cc65
+https://github.com/z88dk/z88dk
+www.z88dk.org

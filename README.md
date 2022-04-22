@@ -49,9 +49,7 @@ Pressing the ALT key while dropping the file inserts it into drive 2.
 
 Use the functions keys to control the emulator itself :
 ```
-* F1       : display save how to
-* ctrl F1  : writes the changes of the floppy in drive 0 back to host
-* alt  F1  : writes the changes of the floppy in drive 1 back to host
+* F1       : about, help
 * F2       : save a screenshot into the screenshots directory
 * F3       : paste text from clipboard
 * F4       : mute / unmute sound
@@ -63,12 +61,14 @@ Use the functions keys to control the emulator itself :
 * F6       : reset joystick action speed,
 * shift F6 : increase joystick action speed
 * crtl  F6 : decrease joystick action speed,
-* F7       : reset the zoom to 2:1
-* shift F7 : increase zoom up to 8:1 max
+* F7       : fullscreen
+* shift F7 : increase zoom up to 6:1 max
 * ctrl  F7 : decrease zoom down to 1:1 pixels
-* F10       : pause / un-pause the emulator
-* F11      : reset
-* F12      : about, help
+* F9       : display save how to
+* ctrl F9  : writes the changes of the floppy in drive 0 back to host
+* alt  F9  : writes the changes of the floppy in drive 1 back to host
+* F10      : pause / un-pause the emulator
+* F12      : ctrl reset
 
 Paddles / Joystick :
 
