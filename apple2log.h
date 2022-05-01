@@ -1,6 +1,8 @@
 #ifndef APPLE2LOG_H_
 #define APPLE2LOG_H_
 
+uint8_t readMem(uint16_t address);
+
 void showDiskMotor(uint16_t address, int q)
 {
 	address &= 7;

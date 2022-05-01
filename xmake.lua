@@ -14,3 +14,7 @@ add_ldflags("-mwindows")
 target("reinetteIIplus_win32") 
 	add_files("reinetteII+.rc")
 	add_files("./reinetteII+.c", "./puce6502.c")
+
+target("reinetteIIe_win32") 
+	add_files("reinetteII+.rc")
+	add_files("./reinetteIIe.c", "./puce65c02.c")

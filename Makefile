@@ -10,10 +10,13 @@ LD_FLAGS = -static -Wl,-subsystem,windows
 
 WIN32-RES = reinetteII+.res
 
-all: reinetteIIplus
+all: reinetteIIplus reinetteIIe
 
 reinetteII+.res: reinetteII+.rc
 	windres $^ -O coff -o $(WIN32-RES)
 
 reinetteIIplus: reinetteII+.c puce6502.c $(WIN32-RES)
+	$(CC) $^ $(FLAGS) $(LIBS) $(WIN32-LIBS) $(LD_FLAGS) -o $@
+
+reinetteIIe: reinetteIIe.c puce65c02.c $(WIN32-RES)
 	$(CC) $^ $(FLAGS) $(LIBS) $(WIN32-LIBS) $(LD_FLAGS) -o $@

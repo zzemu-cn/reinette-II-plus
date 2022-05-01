@@ -1885,7 +1885,7 @@ void dasm(uint16_t address, char *buffer) {
   uint8_t b1 = readMem((address + 1) & 0xFFFF);
   uint8_t b2 = readMem((address + 2) & 0xFFFF);
 
-  sprintf(buffer, "%04X: [%02X %02X] %02X", address, A, X, op);
+  sprintf(buffer, "%04X: [%02X %02X %02X] %02X", address, A, X, Y, op);
   buffer += strlen(buffer);
 
   switch(am[op]) {
